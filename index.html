@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplitRace</title>
+<style>
+  :root{
+    --bg:#10151c; --panel:#18202a; --line:#263241; --text:#e8edf3; --dim:#8a99ab;
+    --gain:#3ddc97; --loss:#ff6b5e; --gold:#f2c14e;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,sans-serif}
+  header{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  h1{margin:0;font-size:20px;font-weight:700}
+  #status{color:var(--dim);font-size:14px}
+  main{max-width:900px;margin:0 auto;padding:16px}
+  .empty{padding:48px 0;text-align:center;color:var(--dim)}
+  .row{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:10px;display:grid;grid-template-columns:40px 1fr auto;gap:4px 14px;align-items:center}
+  .row.off{opacity:.5}
+  .pos{font:700 28px var(--mono);color:var(--dim);grid-row:span 2}
+  .row:first-child .pos{color:var(--gold)}
+  .name{font-weight:700;font-size:18px}
+  .time{font:600 26px var(--mono);text-align:right}
+  .split{color:var(--dim);font-size:14px}
+  .delta{font:14px var(--mono);text-align:right}
+  .delta.gain{color:var(--gain)} .delta.loss{color:var(--loss)}
+  .bar{grid-column:1/-1;height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;background:var(--gain);transition:width .3s}
+  .done .bar i{background:var(--gold)}
+  .tag{font-size:12px;color:var(--dim);margin-left:8px;font-weight:400}
+  form{display:flex;gap:8px}
+  input,button{font:inherit;padding:8px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text)}
+  button{cursor:pointer;background:var(--gold);color:#10151c;border:0;font-weight:700}
+  :focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>SplitRace <span id="roomLabel" class="tag"></span></h1><div id="status">Desconectado</div></div>
+  <form id="roomForm"><input id="roomInput" placeholder="Código de sala" aria-label="Código de sala"><button>Entrar</button></form>
+</header>
+<main><div id="list" class="empty">Introduce un código de sala para ver la carrera.</div></main>
+<script>
+let ws, room = new URLSearchParams(location.search).get('room') || '';
+let snap = null, recvAt = 0;
+
+function fmt(ms, sign){
+  if (ms == null) return '–';
+  const neg = ms < 0, a = Math.abs(ms);
+  const h = Math.floor(a/3600000), m = Math.floor(a%3600000/60000), s = Math.floor(a%60000/1000), c = Math.floor(a%1000/10);
+  const body = (h? h+':'+String(m).padStart(2,'0') : m) + ':' + String(s).padStart(2,'0') + '.' + String(c).padStart(2,'0');
+  return (sign ? (neg?'−':'+') : (neg?'−':'')) + body;
+}
+
+function connect(){
+  if (!room) return;
+  document.getElementById('roomLabel').textContent = 'sala ' + room;
+  ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host);
+  ws.onopen = () => { document.getElementById('status').textContent = 'Conectado'; ws.send(JSON.stringify({type:'watch', room})); };
+  ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type==='snapshot'){ snap = m; recvAt = performance.now(); } };
+  ws.onclose = () => { document.getElementById('status').textContent = 'Reconectando...'; setTimeout(connect, 2000); };
+}
+
+document.getElementById('roomForm').onsubmit = (e) => {
+  e.preventDefault();
+  const v = document.getElementById('roomInput').value.trim();
+  if (v) location.search = '?room=' + encodeURIComponent(v);
+};
+
+function render(){
+  const list = document.getElementById('list');
+  if (!snap) return;
+  if (!snap.players.length){ list.className='empty'; list.textContent='Esperando a que los jugadores conecten su agente.'; return; }
+  list.className = '';
+  const elapsed = performance.now() - recvAt;
+  list.innerHTML = snap.players.map((p, i) => {
+    const running = p.phase === 'Running' && p.connected;
+    const ms = p.phase === 'Ended' ? p.finalMs : (p.currentMs != null ? p.currentMs + (running ? elapsed : 0) : null);
+    const total = p.totalSplits || 0;
+    const done = p.phase === 'Ended';
+    const pct = done ? 100 : (total ? Math.max(0, Math.min(100, (p.splitIndex / total) * 100)) : 0);
+    const where = done ? 'Terminado' : p.phase === 'NotRunning' ? 'Sin empezar' : p.phase === 'Paused' ? 'Pausado' :
+      (p.splitName || ('Split ' + (p.splitIndex + 1))) + (total ? ` (${p.splitIndex + 1}/${total})` : '');
+    const d = p.deltaMs;
+    const dcls = d == null ? '' : d <= 0 ? 'gain' : 'loss';
+    return `<div class="row ${p.connected?'':'off'} ${done?'done':''}">
+      <div class="pos">${i+1}</div>
+      <div class="name">${esc(p.name)}${p.connected?'':'<span class="tag">sin conexión</span>'}</div>
+      <div class="time">${fmt(ms)}</div>
+      <div class="split">${esc(where)}</div>
+      <div class="delta ${dcls}">${d==null?'':fmt(d,true)}</div>
+      ${total ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+    </div>`;
+  }).join('');
+}
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+setInterval(render, 50);
+connect();
+</script>
+</body>
+</html>

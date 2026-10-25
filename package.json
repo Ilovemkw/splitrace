@@ -1,0 +1,13 @@
+{
+  "name": "splitrace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "server": "node server.js",
+    "agent": "node agent.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

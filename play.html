@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplitRace · Jugador</title>
+<style>
+  :root{--bg:#10151c;--panel:#18202a;--line:#263241;--text:#e8edf3;--dim:#8a99ab;--gain:#3ddc97;--loss:#ff6b5e;--gold:#f2c14e}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px;width:100%;max-width:420px}
+  h1{margin:0 0 4px;font-size:20px}
+  p{color:var(--dim);margin:0 0 16px;font-size:14px}
+  label{display:block;margin-bottom:12px;font-size:14px;color:var(--dim)}
+  input{display:block;width:100%;margin-top:4px;font:inherit;padding:9px 12px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+  button{width:100%;font:inherit;font-weight:700;padding:10px;border:0;border-radius:6px;background:var(--gold);color:#10151c;cursor:pointer}
+  :focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+  .st{margin-top:16px;padding:10px 12px;border-radius:6px;background:var(--bg);font-size:14px}
+  .ok{color:var(--gain)} .bad{color:var(--loss)}
+  .live{margin-top:12px;font:14px ui-monospace,Menlo,Consolas,monospace;color:var(--dim)}
+  a{color:var(--gold)}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Conectar mi LiveSplit</h1>
+  <p>En LiveSplit: clic derecho › Control › Start Server. Después rellena esto y deja esta pestaña abierta durante la carrera.</p>
+  <form id="f">
+    <label>Código de sala<input id="room" required></label>
+    <label>Tu nombre<input id="name" required></label>
+    <label>Nº de splits (opcional)<input id="splits" type="number" min="0" value="0"></label>
+    <label>Puerto de LiveSplit<input id="port" type="number" value="16834"></label>
+    <button id="go">Conectar</button>
+  </form>
+  <div class="st" id="ls">LiveSplit: sin conectar</div>
+  <div class="st" id="sv">Servidor: sin conectar</div>
+  <div class="live" id="live"></div>
+  <p style="margin-top:16px"><a id="dash" href="/" target="_blank">Ver clasificación</a></p>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+if (q.get('room')) $('room').value = q.get('room');
+try { $('name').value = localStorage.getItem('sr_name') || ''; } catch {}
+
+function parseTime(s){
+  if (!s || s === '-') return null;
+  const m = /^([+-])?([\d:.]+)$/.exec(s.trim());
+  if (!m) return null;
+  let sec = 0;
+  for (const p of m[2].split(':')) sec = sec * 60 + Number(p);
+  return Math.round((m[1] === '-' ? -1 : 1) * sec * 1000);
+}
+function set(el, text, cls){ el.textContent = text; el.className = 'st ' + (cls || ''); }
+
+let ls, sv, pending = [], busy = false, cfg;
+
+function ask(cmd){
+  return new Promise((resolve, reject) => {
+    if (!ls || ls.readyState !== 1) return reject(new Error('ls'));
+    const t = setTimeout(() => reject(new Error('timeout')), 1500);
+    pending.push({ resolve: (v) => { clearTimeout(t); resolve(v); } });
+    ls.send(cmd);
+  });
+}
+async function readState(){
+  const phase = (await ask('getcurrenttimerphase')).trim();
+  const splitIndex = parseInt(await ask('getsplitindex'), 10);
+  const currentMs = parseTime(await ask('getcurrenttime'));
+  const splitName = await ask('getcurrentsplitname').catch(() => '');
+  const deltaMs = parseTime(await ask('getdelta').catch(() => '-'));
+  const lastSplitMs = parseTime(await ask('getlastsplittime').catch(() => '-'));
+  const finalMs = phase === 'Ended' ? parseTime(await ask('getfinaltime').catch(() => '-')) : null;
+  return { phase, splitIndex: isNaN(splitIndex) ? -1 : splitIndex, splitName: splitName.trim() === '-' ? '' : splitName.trim(),
+           currentMs, deltaMs, lastSplitMs, finalMs, totalSplits: cfg.splits };
+}
+
+function connectLS(){
+  try { ls = new WebSocket('ws://localhost:' + cfg.port + '/livesplit'); } catch { return setTimeout(connectLS, 2000); }
+  ls.onopen = () => set($('ls'), 'LiveSplit: conectado', 'ok');
+  ls.onmessage = (e) => { const p = pending.shift(); if (p) p.resolve(String(e.data)); };
+  ls.onclose = () => { pending = []; set($('ls'), 'LiveSplit: no responde. ¿Está activo Start Server? Reintentando...', 'bad'); setTimeout(connectLS, 2000); };
+  ls.onerror = () => {};
+}
+function connectSV(){
+  sv = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  sv.onopen = () => set($('sv'), 'Servidor: conectado a la sala ' + cfg.room, 'ok');
+  sv.onclose = () => { set($('sv'), 'Servidor: reconectando...', 'bad'); setTimeout(connectSV, 2000); };
+}
+
+async function tick(){
+  if (busy || !cfg || ls?.readyState !== 1 || sv?.readyState !== 1) return;
+  busy = true;
+  try {
+    const state = await readState();
+    sv.send(JSON.stringify({ type: 'update', room: cfg.room, name: cfg.name, state }));
+    $('live').textContent = `${state.phase} · split ${state.splitIndex + 1} ${state.splitName}`;
+  } catch {}
+  busy = false;
+}
+
+// Un Worker mantiene el ritmo aunque la pestaña quede en segundo plano
+const worker = new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),200)'])));
+worker.onmessage = tick;
+
+$('f').onsubmit = (e) => {
+  e.preventDefault();
+  cfg = { room: $('room').value.trim(), name: $('name').value.trim(), splits: +$('splits').value || 0, port: +$('port').value || 16834 };
+  try { localStorage.setItem('sr_name', cfg.name); } catch {}
+  $('dash').href = '/?room=' + encodeURIComponent(cfg.room);
+  $('go').disabled = true; $('go').textContent = 'Conectado';
+  connectLS(); connectSV();
+};
+</script>
+</body>
+</html>
